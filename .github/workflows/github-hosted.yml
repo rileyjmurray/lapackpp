@@ -6,7 +6,7 @@
 #
 #   OpenBLAS                    symbols     LAPACKE         make  cmake
 #   apt libopenblas-dev         dgemm_      liblapacke      x     x
-#   apt libopenblas64-dev       dgemm_      if found        x     x
+#   apt libopenblas64-dev       dgemm_      liblapacke64    x     x
 #   conda libopenblas-ilp64     dgemm_64_   in OpenBLAS     x     x
 name: GitHub-hosted
 
@@ -38,7 +38,7 @@ jobs:
             expect_tester: true
           - openblas: apt-ilp64
             blas_int: int64
-            expect_tester: false   # Ubuntu's ILP64 LAPACKE may be missing
+            expect_tester: true
           - openblas: conda-suffix
             blas_int: int64
             suffix: 64_
@@ -62,8 +62,8 @@ jobs:
         if: matrix.openblas == 'apt-ilp64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopenblas64-dev
-          sudo apt-get install -y liblapacke64-dev || echo "no liblapacke64-dev"
+          # liblapacke64-dev has no header; lapacke.h comes from liblapacke-dev.
+          sudo apt-get install -y libopenblas64-dev liblapacke64-dev liblapacke-dev
           # cblas.h for the ILP64 build isn't on the default include path.
           inc=$(dirname $(ls /usr/include/*/openblas64*/cblas.h | head -1))
           echo "CPATH=$inc" >> $GITHUB_ENV
@@ -139,6 +139,11 @@ jobs:
               exit 0
           fi
           ldd tester | grep -E 'blas|lapack'
+          # ILP64 must use liblapacke64, never the LP64 liblapacke.
+          if [ "${{ matrix.openblas }}" = apt-ilp64 ]; then
+              ldd tester | grep -q 'liblapacke64\.so'
+              ! ldd tester | grep -q 'liblapacke\.so'
+          fi
           # With a suffix, LAPACKE calls must resolve to suffixed symbols.
           if [ -n "${{ matrix.suffix }}" ]; then
               nm -D --undefined-only tester | grep -E ' LAPACKE_\w+$' \
