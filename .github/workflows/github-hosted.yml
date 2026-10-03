@@ -133,8 +133,10 @@ jobs:
           if [ "${{ matrix.maker }}" = cmake ]; then cd build/test; else cd test; fi
           if [ ! -x tester ]; then
               echo "tester not built"
-              [ "${{ matrix.expect_tester }}" = false ]
-              exit
+              # Explicit status: a bare `exit` in a login shell (bash -l)
+              # returns the status of ~/.bash_logout.
+              if [ "${{ matrix.expect_tester }}" = true ]; then exit 1; fi
+              exit 0
           fi
           ldd tester | grep -E 'blas|lapack'
           # With a suffix, LAPACKE calls must resolve to suffixed symbols.
