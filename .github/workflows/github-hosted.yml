@@ -1,0 +1,148 @@
+# Fork-only CI on GitHub-hosted runners. Upstream's CT workflow needs ICL's
+# self-hosted runners, so it never starts on a fork. This lives on the fork's
+# fork-ci branch; PRs into fork-ci run it, and their diffs don't include it.
+#
+# Each job builds BLAS++ (from BLASPP_REF) and LAPACK++, then runs the tester:
+#
+#   OpenBLAS                    symbols     LAPACKE         make  cmake
+#   apt libopenblas-dev         dgemm_      liblapacke      x     x
+#   apt libopenblas64-dev       dgemm_      if found        x     x
+#   conda libopenblas-ilp64     dgemm_64_   in OpenBLAS     x     x
+name: GitHub-hosted
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Switch to icl-utk-edu/blaspp master once blaspp#129 merges.
+  BLASPP_REPO: https://github.com/rileyjmurray/blaspp.git
+  BLASPP_REF:  feature/blas-symbol-suffix
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        maker:   [make, cmake]
+        openblas: [apt-lp64, apt-ilp64, conda-suffix]
+        include:
+          - openblas: apt-lp64
+            blas_int: int32
+            expect_tester: true
+          - openblas: apt-ilp64
+            blas_int: int64
+            expect_tester: false   # Ubuntu's ILP64 LAPACKE may be missing
+          - openblas: conda-suffix
+            blas_int: int64
+            suffix: 64_
+            expect_tester: true
+    name: ${{ matrix.maker }} ${{ matrix.openblas }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone BLAS++
+        run: git clone --depth 1 -b "$BLASPP_REF" "$BLASPP_REPO" blaspp
+
+      #------------------------------------------------------------ OpenBLAS
+      - name: Install OpenBLAS (apt, LP64)
+        if: matrix.openblas == 'apt-lp64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev liblapacke-dev
+
+      - name: Install OpenBLAS (apt, ILP64)
+        if: matrix.openblas == 'apt-ilp64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas64-dev
+          sudo apt-get install -y liblapacke64-dev || echo "no liblapacke64-dev"
+          # cblas.h for the ILP64 build isn't on the default include path.
+          inc=$(dirname $(ls /usr/include/*/openblas64*/cblas.h | head -1))
+          echo "CPATH=$inc" >> $GITHUB_ENV
+
+      - name: Install OpenBLAS (conda-forge, ILP64, symbol suffix 64_)
+        if: matrix.openblas == 'conda-suffix'
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: blas
+          create-args: openblas-ilp64 libopenblas-ilp64
+          condarc: |
+            channels: [conda-forge]
+
+      - name: Point the system compiler at conda's OpenBLAS
+        if: matrix.openblas == 'conda-suffix'
+        run: |
+          # The runtime package may ship only the versioned library.
+          [ -e $CONDA_PREFIX/lib/libopenblas64_.so ] \
+              || ln -s libopenblas64_.so.0 $CONDA_PREFIX/lib/libopenblas64_.so
+          echo "CPATH=$CONDA_PREFIX/include" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$CONDA_PREFIX/lib" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib" >> $GITHUB_ENV
+
+      #------------------------------------------------------------ Build
+      - name: Build (make)
+        if: matrix.maker == 'make'
+        run: |
+          set -x
+          args=( blas=openblas blas_int=${{ matrix.blas_int }} )
+          [ -n "$LDFLAGS" ] && args+=( "LDFLAGS=$LDFLAGS" )
+          sfx=${{ matrix.suffix }}
+          # LAPACK++'s GNUmakefile finds BLAS++ in ./blaspp and builds it.
+          # Build it serially first; testsweeper's nested configure races
+          # under make -j.
+          ( cd blaspp && python3 configure.py "${args[@]}" ${sfx:+blas_symbol_suffix=$sfx} ) \
+              || { cat blaspp/config/log.txt; exit 1; }
+          make -C blaspp -j1 lib
+          python3 configure.py "${args[@]}" ${sfx:+lapack_symbol_suffix=$sfx} \
+              || { cat config/log.txt; exit 1; }
+          cat include/lapack/defines.h
+          make -j4 lib
+          make -j4 tester || [ "${{ matrix.expect_tester }}" = false ]
+
+      - name: Build (cmake)
+        if: matrix.maker == 'cmake'
+        run: |
+          set -x
+          sfx=${{ matrix.suffix }}
+          # The suffix goes only to BLAS++; LAPACK++ inherits it.
+          cmake -S blaspp -B blaspp/build -Dcolor=no -Dbuild_tests=no \
+                -Dblas=openblas -Dblas_int=${{ matrix.blas_int }} \
+                ${sfx:+-Dblas_symbol_suffix=$sfx} \
+                -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
+                -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS" \
+                -DCMAKE_INSTALL_PREFIX=$PWD/install
+          cmake --build blaspp/build -j4 --target install
+          cmake -S . -B build -Dcolor=no -Dbuild_tests=yes \
+                -DCMAKE_PREFIX_PATH=$PWD/install \
+                -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
+                -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS"
+          cat build/include/lapack/defines.h
+          cmake --build build -j4
+
+      #------------------------------------------------------------ Test
+      - name: Test
+        run: |
+          if [ "${{ matrix.maker }}" = cmake ]; then cd build/test; else cd test; fi
+          if [ ! -x tester ]; then
+              echo "tester not built"
+              [ "${{ matrix.expect_tester }}" = false ]
+              exit
+          fi
+          ldd tester | grep -E 'blas|lapack'
+          # With a suffix, LAPACKE calls must resolve to suffixed symbols.
+          if [ -n "${{ matrix.suffix }}" ]; then
+              nm -D --undefined-only tester | grep -E ' LAPACKE_\w+$' \
+                  | grep -v '${{ matrix.suffix }}$' \
+                  && { echo "unsuffixed LAPACKE symbols"; exit 1; }
+              nm -D --undefined-only tester | grep -cE ' LAPACKE_\w+${{ matrix.suffix }}$'
+          fi
+          export OMP_NUM_THREADS=4
+          python3 run_tests.py --quick --host
