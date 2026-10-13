@@ -15,9 +15,8 @@ on:
   workflow_dispatch:
 
 env:
-  # Switch to icl-utk-edu/blaspp master once blaspp#129 merges.
-  BLASPP_REPO: https://github.com/rileyjmurray/blaspp.git
-  BLASPP_REF:  feature/blas-symbol-suffix
+  BLASPP_REPO: https://github.com/icl-utk-edu/blaspp.git
+  BLASPP_REF:  master
 
 defaults:
   run:
