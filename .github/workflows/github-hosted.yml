@@ -13,6 +13,8 @@ name: GitHub-hosted
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    branches: [fork-ci]
 
 env:
   BLASPP_REPO: https://github.com/icl-utk-edu/blaspp.git
@@ -46,6 +48,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A workflow-only update also checks the current PR implementation.
+          ref: ${{ github.event_name == 'push' && 'lapack-symbol-suffix-v2' || github.sha }}
 
       - name: Clone BLAS++
         run: git clone --depth 1 -b "$BLASPP_REF" "$BLASPP_REPO" blaspp
@@ -158,4 +163,25 @@ jobs:
               nm -D --undefined-only tester | grep -cE ' LAPACKE_\w+${{ matrix.suffix }}$'
           fi
           export OMP_NUM_THREADS=4
-          python3 run_tests.py --quick --host
+          set +e
+          python3 run_tests.py --quick --host --xml report.xml 2>&1 | tee tester.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+              python3 - <<'PYREPORT'
+          import re
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          if Path('report.xml').exists():
+              for case in ET.parse('report.xml').iter('testcase'):
+                  if case.find('failure') is None:
+                      continue
+                  output = case.findtext('system-out', '')
+                  lines = [line for line in output.splitlines()
+                           if re.search(r'fail|error|assert', line, re.I)]
+                  message = '\n'.join(lines[-40:]) or output[-8000:]
+                  message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f"::error title=Tester {case.get('name')}::{message[:12000]}")
+          PYREPORT
+              exit "$test_status"
+          fi
