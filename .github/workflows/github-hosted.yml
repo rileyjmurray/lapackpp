@@ -127,6 +127,13 @@ jobs:
           cmake --build build -j4
 
       #------------------------------------------------------------ Test
+      - name: Check independent symbol suffixes
+        run: |
+          if [ -f test/check_symbol_suffix.py ]; then
+              OMP_NUM_THREADS=1 python3 test/check_symbol_suffix.py \
+                  --work-dir "$RUNNER_TEMP/suffix-checks"
+          fi
+
       - name: Test
         run: |
           if [ "${{ matrix.maker }}" = cmake ]; then cd build/test; else cd test; fi
