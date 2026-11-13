@@ -3,9 +3,27 @@
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the BSD 3-Clause license. See the accompanying LICENSE file.
 
-# Convert to list, as lapack_libs is later, to match cached value.
-string( REGEX REPLACE "([^ ])( +|\\\;)" "\\1;"    LAPACK_LIBRARIES "${LAPACK_LIBRARIES}" )
-string( REGEX REPLACE "-framework;" "-framework " LAPACK_LIBRARIES "${LAPACK_LIBRARIES}" )
+# LAPACK_LIBRARIES is a CMake list. Each entry that isn't an existing file
+# is split on spaces, e.g., "-llapack -lblas"; an existing file is kept whole,
+# e.g., "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib/mkl_rt.lib".
+# "-framework Accelerate" stays one entry.
+# Save the normalized list in the cache, so re-passing the same value
+# doesn't redo the search, and unset any normal variable that shadows it.
+set( lapack_libraries_in_ ${LAPACK_LIBRARIES} )  # Not "quoted"; also splits on \;
+set( lapack_libraries_normalized_ "" )
+foreach (entry_ IN LISTS lapack_libraries_in_)
+    string( STRIP "${entry_}" entry_ )
+    if (NOT EXISTS "${entry_}")
+        string( REGEX REPLACE " +" ";" entry_ "${entry_}" )
+    endif()
+    list( APPEND lapack_libraries_normalized_ ${entry_} )  # Not "quoted"; drops empty entries.
+endforeach()
+string( REGEX REPLACE "-framework;" "-framework "
+        lapack_libraries_normalized_ "${lapack_libraries_normalized_}" )
+if (NOT "${lapack_libraries_normalized_}" STREQUAL "$CACHE{LAPACK_LIBRARIES}")
+    set( LAPACK_LIBRARIES "${lapack_libraries_normalized_}" CACHE STRING "" FORCE )
+endif()
+unset( LAPACK_LIBRARIES )
 
 message( DEBUG "LAPACK_LIBRARIES '${LAPACK_LIBRARIES}'"        )
 message( DEBUG "  cached         '${lapack_libraries_cached}'" )
@@ -26,7 +44,9 @@ elseif (NOT ("${lapack_cached}" STREQUAL "${lapack}"))
     # Ignore LAPACK_LIBRARIES if lapack* changed.
     message( DEBUG "unset LAPACK_LIBRARIES" )
     set( LAPACK_LIBRARIES "" CACHE INTERNAL "" )
-else()
+elseif (DEFINED lapack_symbol_suffix_cached
+        AND "${lapack_symbol_suffix_cached}" STREQUAL "${lapack_symbol_suffix}"
+        AND "${lapack_blas_defines_cached}" STREQUAL "${blaspp_defines}")
     message( DEBUG "LAPACK search already done for
     lapack           = ${lapack}
     LAPACK_LIBRARIES = ${LAPACK_LIBRARIES}" )
@@ -35,6 +55,8 @@ endif()
 
 set( lapack_libraries_cached ${LAPACK_LIBRARIES} CACHE INTERNAL "" )  # updated later
 set( lapack_cached           ${lapack}           CACHE INTERNAL "" )
+set( lapack_symbol_suffix_cached "${lapack_symbol_suffix}" CACHE INTERNAL "" )
+set( lapack_blas_defines_cached "${blaspp_defines}" CACHE INTERNAL "" )
 
 include( "cmake/util.cmake" )
 
@@ -119,7 +141,7 @@ foreach (lapack_libs IN LISTS lapack_libs_list)
             # Not "quoted"; screws up OpenMP.
             ${lapack_libs} ${blaspp_libraries}
         COMPILE_DEFINITIONS
-            ${blaspp_defines}
+            ${blaspp_defines} ${lapack_symbol_suffix_def}
         COMPILE_OUTPUT_VARIABLE
             compile_output
         RUN_OUTPUT_VARIABLE
